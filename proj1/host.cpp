@@ -1,26 +1,35 @@
-#include "host.h"
+#include "host.hpp"
 
-host::host(std::string mac, std::string ip) {
+Host::Host(std::string mac, std::string ip) {
     m_mac = mac;
     m_ip = ip;
     m_is_arp = false;
+    m_num_packets = 1;
 }
 
-host::host(std::string mac) {
+Host::Host(std::string mac, bool is_arp) {
     m_mac = mac;
     m_ip = "";
-    m_is_arp = true;
+    m_is_arp = is_arp;
+    m_num_packets = 1;
 }
 
-std::string host::to_string() {
-    std::string to_string = "MAC Address: %s\n", m_mac;
-    to_string += (m_ip == "") ? "" : ("IPv4 Address: %s\n", m_ip);
-    to_string += ("Number of Packets: %d\n", m_num_packets);
-    return to_string;
+std::string Host::to_string() {
+
+    std::string str = "MAC Address: " + m_mac + "\n";
+    if (m_ip != "") {
+        str += "IP Address: " + m_ip + "\n";
+    }
+    if (m_is_arp) {
+        str += "Is ARP Machine\n";
+    }
+    str += "Number of Packets: " + std::to_string(m_num_packets) + "\n";
+
+    return str;
 }
 
-void host::increment_packet_count() { m_num_packets++; }
+void Host::increment_packet_count() { m_num_packets++; }
 
-int host::get_packet_count() { return m_num_packets; }
+int Host::get_packet_count() { return m_num_packets; }
 
-bool host::operator()(host a, host b) { return a.m_mac < b.m_mac; }
+bool Host::operator<(Host b) const { return m_mac + m_ip < b.m_mac + b.m_ip; }

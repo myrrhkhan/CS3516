@@ -1,7 +1,7 @@
-#include <stdlib.h>
 #include <string>
+#pragma once
 
-class host {
+class Host {
   private:
     std::string m_mac;
     std::string m_ip;
@@ -9,8 +9,8 @@ class host {
     bool m_is_arp;
 
   public:
-    host(std::string mac, std::string ip);
-    host(std::string mac);
+    Host(std::string mac, std::string ip);
+    Host(std::string mac, bool is_arp);
 
     std::string to_string();
 
@@ -18,5 +18,6 @@ class host {
 
     int get_packet_count();
 
-    bool operator()(host a, host b);
+    bool operator<(const Host b) const;
+    bool compare(Host a, Host b);
 };

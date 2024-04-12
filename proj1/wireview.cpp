@@ -1,13 +1,18 @@
-#include "host.h"
-#include <functional>
-#include <list>
+#include "host.hpp"
+#include "info.hpp"
+#include <iomanip>
+#include <iostream>
 #include <netinet/if_ether.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
 #include <pcap/pcap.h>
 #include <stdlib.h>
+#define SIZE_ETHERNET 14
 
 void pcap_callback(u_char *user, const struct pcap_pkthdr *arg2,
                    const u_char *arg3);
-void parse_packet_timing(const struct pcap_pkthdr *packet);
+void print_packet_timing(const struct pcap_pkthdr *packet);
+void parse_unique_senders_receivers(Info *info, const u_char *packet);
 
 int main(int argc, char **argv) {
 
@@ -27,31 +32,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct desired_info {
-        int num_packets;
-        // create list of unique senders and receivers. list should have both
-        // MAC and IP addresses each element of list should have sublist with 2
-        // elements, one for MAC one for IP
-        std::list<host> unique_senders;
-        std::list<host> unique_receivers;
-
-        std::hash<int> UDP_sources;
-        std::hash<int> UDP_dests;
-
-        std::list<int> packet_sizes;
-    };
-
     // initialize a desired_info struct
-    struct desired_info info_struct = {.num_packets = 0,
-                                       .unique_senders = std::list<host>(),
-                                       .unique_receivers = std::list<host>(),
-
-                                       .UDP_sources = std::hash<int>(),
-                                       .UDP_dests = std::hash<int>(),
-
-                                       .packet_sizes = std::list<int>()};
-    // cast to u_char to fit pcap_callback arg params
-    u_char *info = (u_char *)&info_struct; // mutable borrow: 1
+    Info info = Info(); // cast to u_char to fit pcap_callback arg params
+    u_char *info_uchar = (u_char *)&info; // mutable borrow: 1
 
     // Check that data provided is via Ethernet via pcap_datalink()
     // https://www.man7.org/linux/man-pages/man3/pcap_datalink.3pcap.html
@@ -61,11 +44,17 @@ int main(int argc, char **argv) {
     printf("Ethernet data was %sprovided\n", str);
 
     // Loop through packets in the pcap file
-    pcap_loop(packet, -1, pcap_callback, info);
+    pcap_loop(packet, -1, pcap_callback, info_uchar);
     // pcap_loop(packet, -1, pcap_callback, NULL);
 
     // Close the pcap file
     pcap_close(packet);
+
+    // print final
+    printf("Final\n");
+    // convert u_char back to Info class
+    info = *(Info *)info_uchar;
+    std::cout << info.to_string() << std::endl;
 }
 
 /**
@@ -74,19 +63,26 @@ int main(int argc, char **argv) {
  * @param user u_char * to piece of data you want to be modified. Any data type
  * can be cast to u_char
  * @param arg2 const struct pcap_pkthdr packet info struct
- * @param arg3
+ * @param arg3 const u_char packet
  */
-void pcap_callback(u_char *user, const struct pcap_pkthdr *arg2,
-                   const u_char *arg3) {
+void pcap_callback(u_char *user, const struct pcap_pkthdr *header,
+                   const u_char *packet) {
     // callback function for pcap_loop
     // arg1: user data
     // arg2: packet header
     // arg3: packet data
-    printf("Packet captured\n");
+    // printf("Packet captured\n");
 
-    struct desired_info *info = (struct desired_info *)user;
+    Info *info = (Info *)user;
+    // increment packet quantity
+    info->increment_packet_qty();
 
-    parse_packet_timing(arg2);
+    // add packet size:
+    info->add_packet_size(header->len);
+
+    // print timing for packet
+    print_packet_timing(header);
+    parse_unique_senders_receivers(info, packet);
 }
 
 /**
@@ -94,26 +90,96 @@ void pcap_callback(u_char *user, const struct pcap_pkthdr *arg2,
  *
  * @param packet The packet header to parse
  */
-void parse_packet_timing(const struct pcap_pkthdr *packet) {
+void print_packet_timing(const struct pcap_pkthdr *header) {
     // Parse the packet header
     // Print the start time of the packet
-    printf("Packet Start Time: %ld %d\n", packet->ts.tv_sec,
-           packet->ts.tv_usec);
+
+    // get ACII time
+    time_t time = (time_t)header->ts.tv_sec;
+    // add microseconds to time
+    time += (time_t)header->ts.tv_usec / 1000000;
+
+    char time_str[20];
+    std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S",
+                  std::localtime(&time));
+    std::cout << "Packet Start Time " << time_str << "." << std::setw(6)
+              << std::setfill('0') << header->ts.tv_usec << std::endl;
+
+    // printf("Packet Start Time: %s\n", asctime(gmtime(&time)));
     // Print the capture length of the packet
-    printf("Packet Capture Length: %d\n", packet->caplen);
+    printf("Packet Capture Length: %d\n", header->caplen);
     // Print the length of the packet
-    printf("Packet Length: %d\n", packet->len);
+    printf("Packet Length: %d\n", header->len);
 }
 
-void parse_unique_senders_receivers(u_char *info,
-                                    const struct pcap_pkthdr *packet) {
-    // Find the source and destination MAC addresses from packet, print it
-    struct ether_header *eth_header = (struct ether_header *)packet;
-    char *source_mac = eth_header->ether_shost;
-    char *dest_mac = eth_header->ether_dhost;
+void save_packet_size(Info *info, const struct pcap_pkthdr *header) {
+    info->add_packet_size(header->len);
+}
 
-    // Find the source and destination IP addresses from packet, print it
-    struct ip *ip_header = (struct ip *)(packet + sizeof(struct ether_header));
-    char *source_ip = inet_ntoa(ip_header->);
-    char *dest_ip = inet_ntoa(ip_header->);
+/**
+ * @brief Finds unique senders and receivers, called during callback
+ *
+ * @param info information being held, Info class
+ * @param packet current packet, const u_char pointer
+ */
+void parse_unique_senders_receivers(Info *info, const u_char *packet) {
+    std::string mac_dest;
+    std::string mac_src;
+    std::string ip_src;
+    std::string ip_dest;
+    bool is_arp = false;
+    bool is_ip = false;
+    Host src = Host("", "");
+    Host dest = Host("", "");
+
+    // convert to ether header struct to get info
+    struct ether_header *eth = (struct ether_header *)packet;
+    struct ip *ip = (struct ip *)(packet + SIZE_ETHERNET);
+    struct sniff_udp {
+        u_short uh_sport;
+        u_short uh_dport;
+    };
+    struct sniff_udp *udp =
+        (struct sniff_udp *)(packet + SIZE_ETHERNET + ip->ip_hl * 4);
+
+    // get type of transmission
+    uint32_t type = ntohs(eth->ether_type);
+    if (type == ETHERTYPE_IP) {
+        is_ip = true;
+    } else if (type == ETHERTYPE_ARP) {
+        is_arp = true;
+    } // else it's just ethernet
+
+    // Save MAC addresses
+    mac_dest = ether_ntoa((struct ether_addr *)eth->ether_dhost);
+    mac_src = ether_ntoa((struct ether_addr *)eth->ether_shost);
+
+    // if IP is true, collect for both, save host vars
+    if (is_ip == true) {
+        ip_src = std::string(inet_ntoa(ip->ip_src));
+        ip_dest = std::string(inet_ntoa(ip->ip_dst));
+        src = Host(mac_src, ip_src);
+        dest = Host(mac_dest, ip_dest);
+    } else {
+        src = Host(mac_src, is_arp);
+        dest = Host(mac_dest, is_arp);
+    }
+
+    info->add_sender(src);
+    info->add_receiver(dest);
+
+    if (is_arp) {
+        info->add_arp_machine(src);
+        info->add_arp_machine(dest);
+    }
+
+    // if UDP exists, save ports
+    if (udp != NULL) {
+        // get src and dest ports
+        info->add_UDP_src(ntohs(udp->uh_sport));
+        info->add_UDP_dest(ntohs(udp->uh_dport));
+        std::cout << "UDP Source Port: " << ntohs(udp->uh_sport) << std::endl;
+        std::cout << "UDP Destination Port: " << ntohs(udp->uh_dport)
+                  << std::endl;
+    }
 }
