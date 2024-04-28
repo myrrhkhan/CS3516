@@ -2,12 +2,17 @@
 #include "info.hpp"
 #include <iomanip>
 #include <iostream>
-#include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <pcap/pcap.h>
 #include <stdlib.h>
 #define SIZE_ETHERNET 14
+
+#ifdef __MACH__
+#include <netinet/if_ether.h>
+#else
+#include <netinet/ether.h>
+#endif
 
 void pcap_callback(u_char *user, const struct pcap_pkthdr *arg2,
                    const u_char *arg3);
@@ -151,8 +156,8 @@ void parse_unique_senders_receivers(Info *info, const u_char *packet) {
     } // else it's just ethernet
 
     // Save MAC addresses
-    mac_dest = ether_ntoa((struct ether_addr *)eth->ether_dhost);
-    mac_src = ether_ntoa((struct ether_addr *)eth->ether_shost);
+    mac_dest = ether_ntoa((const struct ether_addr *)eth->ether_dhost);
+    mac_src = ether_ntoa((const struct ether_addr *)eth->ether_shost);
 
     // if IP is true, collect for both, save host vars
     if (is_ip == true) {
