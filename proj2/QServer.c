@@ -17,19 +17,52 @@ void DieWithError(char *errorMessage) {
 void HandleTCPClient(int clntSocket) {
     char echoBuffer[RCVBUFSIZE]; /* Buffer for echo string */
     int recvMsgSize;             /* Size of received message */
-    /* Receive message from client */
+    /* Receive filesize from client */
     if ((recvMsgSize = recv(clntSocket, echoBuffer, RCVBUFSIZE, 0)) < 0)
-        DieWithError("recv() failed");
+        DieWithError("recv() of length failed");
 
+    printf("Received: %s\n", echoBuffer);
+
+    /* Receive image from client */
     const int FILELEN = atoi(echoBuffer);
+    printf("File length: %d\n", FILELEN);
     char file[FILELEN];
 
     if ((recvMsgSize = recv(clntSocket, file, FILELEN, 0)) < 0)
         DieWithError("recv() of image bytes failed");
 
-    FILE *imgfile = fopen("", "0.png");
+    printf("Received file: %s\n", file);
+
+    /* Save image locally */
+    char name[10];
+    snprintf(name, 10, "%d", num_users);
+    FILE *imgfile = fopen("", name);
     fprintf(imgfile, "%s", file);
-    fclose(imgfile);
+
+    /* Run java command to process QR code, save result string to buffer */
+    char command[200];
+    snprintf(command, 200,
+             "java -cp javase.jar:core.jar "
+             "com.google.zxing.client.j2se.CommandLineRunner %s",
+             name);
+
+    /* Run command and get result */
+    FILE *fp = popen(command, "r"); // used in CS 4513
+    char url[200];
+    if (fp == NULL) {
+        DieWithError("Failed to run Java command");
+    }
+    fgets(url, sizeof(url), fp);
+
+    /* Close file and remove image */
+    pclose(fp);
+    if (remove(name) != 0) {
+        DieWithError("Failed to remove image file");
+    }
+
+    /* Send result back to client */
+    if (send(clntSocket, url, sizeof(url), 0) != sizeof(url))
+        DieWithError("send() could not send URL back to client");
 
     close(clntSocket); /* Close client socket */
 
@@ -71,6 +104,8 @@ int main(int argc, char *argv[]) {
     /* Mark the socket so it will listen for incoming connections */
     if (listen(servSock, MAXPENDING) < 0)
         DieWithError("listen() failed");
+
+    printf("Server is running on port %d\n", echoServPort);
     for (;;) /* Run forever */
     {
         /* Set the size of the in-out parameter */
