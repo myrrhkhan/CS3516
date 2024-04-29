@@ -15,6 +15,78 @@ void DieWithError(char *errorMessage) {
 }
 
 void HandleTCPClient(int clntSocket) {
+    // variables
+    unsigned int len;
+
+    char buffer[RCVBUFSIZE];
+    int received_len = 0;
+
+    int recvMsgSize;
+    int num_received = 0;
+
+    char img[RCVBUFSIZE];
+
+    // if capture fail
+    if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
+        DieWithError("recv() failed");
+    }
+
+    // print buffer
+    printf("Received: %s\n", buffer);
+
+    while (recvMsgSize > 0) {
+
+        // if no length, read in length
+        if (!received_len) {
+            len = atoi(buffer);
+            printf("Length: %d\n", len);
+            received_len = 1;
+            continue;
+        } else if (num_received == len) {
+            received_len = 0;
+            num_received = 0;
+
+            char name[10];
+            snprintf(name, 10, "%d", num_users);
+            FILE *imgfile = fopen(name, "w");
+            fprintf(imgfile, "%s", img);
+            // find QR code with Java and popen, save result
+            char command[200 + len];
+            snprintf(command, 200 + len,
+                     "java -cp javase.jar:core.jar "
+                     "com.google.zxing.client.j2se.CommandLineRunner %s",
+                     name);
+            FILE *fp = popen(command, "r");
+            char url[200];
+            if (fp == NULL) {
+                DieWithError("Failed to run Java command");
+            }
+            fgets(url, sizeof(url), fp);
+            // close file and remove image
+            pclose(fp);
+            if (remove(name) != 0) {
+                DieWithError("Failed to remove image file");
+            }
+            // send result back to client
+            if (send(clntSocket, url, sizeof(url), 0) != sizeof(url))
+                DieWithError("send() could not send URL back to client");
+            // reset length
+            len = 0;
+            continue;
+        }
+
+        num_received++;
+
+        // save image as string
+
+        // if next capture fail
+        if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
+            DieWithError("recv() failed");
+        }
+    }
+}
+
+void HandleTCPClient2(int clntSocket) {
     char echoBuffer[RCVBUFSIZE]; /* Buffer for echo string */
     int recvMsgSize;             /* Size of received message */
     /* Receive filesize from client */
