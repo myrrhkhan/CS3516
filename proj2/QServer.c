@@ -1,4 +1,5 @@
 #include <arpa/inet.h> /* for sockaddr_in and inet_ntoa() */
+#include <getopt.h>    /* for getopt() */
 #include <pthread.h>
 #include <stdio.h>      /* for printf() and fprintf() */
 #include <stdlib.h>     /* for atoi() and exit() */
@@ -12,7 +13,7 @@
 #define TIMEOUT 10
 #define MAXSIZE 250000 /* Maximum size of image */
 
-int num_imgs = 0;
+int proc_num = 0;
 
 void AcceptClient() { struct sockaddr_in ClientAddrs[MAXPENDING]; }
 
@@ -176,8 +177,8 @@ void HandleTCPClient(int clntSocket) {
 
     // File to save image
     char name[10];
-    snprintf(name, 10, "%d.png", num_imgs);
-    num_imgs++;
+    snprintf(name, 10, "%d.png", proc_num);
+    proc_num++;
     FILE *imgfile = fopen(name, "wb");
     if (imgfile == NULL) {
         DieWithError("Failed to open file");
@@ -269,12 +270,6 @@ int main(int argc, char *argv[]) {
     for (;;) /* Run forever */
     {
 
-        // // threads for each client
-        // pthread_t thread_ids[MAXPENDING];
-        // for (int i = 0; i < MAXPENDING; i++) {
-        //     pthread_create(&thread_ids[i], NULL, HandleTCPClient, clntSock);
-        // }
-
         /* Set the size of the in-out parameter */
         clntLen = sizeof(echoClntAddr);
         /* Wait for a client to connect */
@@ -283,7 +278,6 @@ int main(int argc, char *argv[]) {
             DieWithError("accept() failed");
         /* clntSock is connected to a client! */
         printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
-        sleep(3);
         HandleTCPClient(clntSock);
     }
     /* NOT REACHED */
