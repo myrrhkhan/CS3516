@@ -82,6 +82,9 @@ void HandleTCPClient(int clntSocket) {
         status_code = 3;
         return SendError(clntSocket, status_code);
     }
+    printf("Length of image: %d\n", len);
+
+    char imgbuf[len];
 
     // File to save image
     char name[10];
@@ -94,20 +97,24 @@ void HandleTCPClient(int clntSocket) {
 
     while (num_received < len) {
 
-        if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
+        if ((recvMsgSize = recv(clntSocket, imgbuf, len, 0)) < 0) {
             DieWithError("recv() failed");
-            // } else if (recvMsgSize + num_received > len) {
-            //     printf("Overflow checking\n");
-            //     recvMsgSize = len - num_received;
+        } else if (recvMsgSize == 0) {
+            DieWithError("recv() failed: connection closed prematurely");
+        } else if (recvMsgSize + num_received > len) {
+            printf("Overflow checking\n");
+            recvMsgSize = len - num_received;
         }
-        printf("Received: %d\n", recvMsgSize);
-        printf("Total received: %d\n", num_received);
-        printf("Total length: %d\n", len);
+        for (int i = 0; i < recvMsgSize; i++) {
+            printf("%d ", imgbuf[i]);
+        }
+        printf("received %d bytes\n", recvMsgSize);
         num_received += recvMsgSize;
-        if (fwrite(buffer, 1, recvMsgSize, imgfile) != recvMsgSize) {
+        if (fwrite(imgbuf, 1, len, imgfile) != len) {
             DieWithError("Failed to write image data to file");
         }
     }
+    printf("\n");
 
     fclose(imgfile);
 
@@ -222,6 +229,7 @@ int main(int argc, char *argv[]) {
         DieWithError("listen() failed");
 
     printf("Server is running on port %d\n", echoServPort);
+
     for (;;) /* Run forever */
     {
 
@@ -239,6 +247,7 @@ int main(int argc, char *argv[]) {
             DieWithError("accept() failed");
         /* clntSock is connected to a client! */
         printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
+        sleep(3);
         HandleTCPClient(clntSock);
     }
     /* NOT REACHED */

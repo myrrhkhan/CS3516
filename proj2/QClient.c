@@ -49,7 +49,9 @@ int main(int argc, char *argv[]) {
     char qr_string[qr_len + 1];
     fread(qr_string, 1, st.st_size, qr_file);
     qr_string[qr_len] = '\0';
+    printf("QR Length: %d\n", qr_len);
     fclose(qr_file);
+    printf("\n");
 
     // for (int i = 0; i < qr_len; i++) {
     // printf("%d ", qr_string[i]);
@@ -77,7 +79,15 @@ int main(int argc, char *argv[]) {
 
     char len[10];
     snprintf(len, 10, "%d", qr_len);
+    for (int i = 0; i < strlen(len); i++) {
+        printf("%d ", len[i]);
+    }
     // printf("Sending over first message: %s\n", len);
+    printf("Sending in\n");
+    for (int i = 0; i < qr_len; i++) {
+        printf("%d ", qr_string[i]);
+    }
+    printf("Now.");
     if (send(sock, len, strlen(len), 0) != strlen(len))
         DieWithError("send() could not send URL back to client");
     // printf("Sending over second message: %s\n", qr_string);
