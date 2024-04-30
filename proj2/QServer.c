@@ -16,6 +16,15 @@ int num_imgs = 0;
 
 void AcceptClient() { struct sockaddr_in ClientAddrs[MAXPENDING]; }
 
+void delay_send(void) {
+    printf("Sending in\n");
+    for (int i = 3; i > 0; i--) {
+        printf("%d\n", i);
+        sleep(1);
+    }
+    printf("Now.\n");
+}
+
 void DieWithError(char *errorMessage) {
     fprintf(stderr, "%s\n", errorMessage);
     exit(-1);
@@ -36,10 +45,12 @@ void SendError(int clntSocket, int status_code) {
     if (status_code == 1) {
         err = "No barcode found";
     } else if (status_code == 2) {
-        err = "Timeout";
+        err = "Timeout, or weird bug where first 28 bytes are missing.";
     } else if (status_code == 3) {
         err = "Rate limit exceeded, image too large.";
     }
+
+    delay_send();
 
     err_len = strlen(err);
     snprintf(err_len_str, 10, "%d", err_len);
@@ -48,6 +59,9 @@ void SendError(int clntSocket, int status_code) {
         strlen(err_len_str)) {
         DieWithError("send() could not send error length back to client");
     }
+
+    delay_send();
+
     // send error
     if (send(clntSocket, err, err_len, 0) != err_len) {
         DieWithError("send() could not send error back to client");
@@ -57,71 +71,12 @@ void SendError(int clntSocket, int status_code) {
     return;
 }
 
-void HandleTCPClient(int clntSocket) {
-    // current time
-    time_t now;
-    time(&now);
-    // variables
-    unsigned int len = 0;
-
-    char buffer[RCVBUFSIZE]; /* Buffer for echo string */
-
-    int recvMsgSize;
-    int num_received = 0;
-
+void analyze_send_url(int clntSocket, char *name) {
     int status_code = 0;
-
-    // if capture fail
-    if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
-        DieWithError("recv() failed");
-    }
-
-    buffer[recvMsgSize] = '\0'; /* Terminate the string! */
-    len = atoi(buffer);
-    if (len > MAXSIZE) {
-        status_code = 3;
-        return SendError(clntSocket, status_code);
-    }
-    printf("Length of image: %d\n", len);
-
-    char imgbuf[len];
-
-    // File to save image
-    char name[10];
-    snprintf(name, 10, "%d.png", num_imgs);
-    num_imgs++;
-    FILE *imgfile = fopen(name, "wb");
-    if (imgfile == NULL) {
-        DieWithError("Failed to open file");
-    }
-
-    while (num_received < len) {
-
-        if ((recvMsgSize = recv(clntSocket, imgbuf, len, 0)) < 0) {
-            DieWithError("recv() failed");
-        } else if (recvMsgSize == 0) {
-            DieWithError("recv() failed: connection closed prematurely");
-        } else if (recvMsgSize + num_received > len) {
-            printf("Overflow checking\n");
-            recvMsgSize = len - num_received;
-        }
-        for (int i = 0; i < recvMsgSize; i++) {
-            printf("%d ", imgbuf[i]);
-        }
-        printf("received %d bytes\n", recvMsgSize);
-        num_received += recvMsgSize;
-        if (fwrite(imgbuf, 1, len, imgfile) != len) {
-            DieWithError("Failed to write image data to file");
-        }
-    }
-    printf("\n");
-
-    fclose(imgfile);
-
     // fstat
     struct stat st;
     stat(name, &st);
-    len = st.st_size;
+    int len = st.st_size;
     printf("File size: %d\n", len);
 
     // find QR code with Java and popen, save result
@@ -158,7 +113,8 @@ void HandleTCPClient(int clntSocket) {
         } else if (strstr(all, "No barcode found") != NULL) {
             strcpy(url, "No barcode found");
             status_code = 1;
-            return SendError(clntSocket, status_code);
+            SendError(clntSocket, status_code);
+            return;
         }
     }
     printf("URL: %s\n", url);
@@ -168,17 +124,97 @@ void HandleTCPClient(int clntSocket) {
         DieWithError("Failed to remove image file");
     }
     // send status code
-    char status[10];
-    snprintf(status, 10, "%d", status_code);
+    char *status = "0";
     if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
         DieWithError("send() could not send status code back to client");
     }
-    // send result back to client
+    // send length of URL
+    char url_len[10];
+    snprintf(url_len, 10, "%lu", strlen(url));
+    if (send(clntSocket, url_len, strlen(url_len), 0) != strlen(url_len)) {
+        DieWithError("send() could not send URL length back to client");
+    }
+    // send result back to client, wait 3 seconds before sending to prevent data
+    // loss
+
+    delay_send();
+
     if (send(clntSocket, url, strlen(url), 0) != strlen(url)) {
         DieWithError("send() could not send URL back to client");
     }
-    // reset length
-    len = 0;
+}
+
+void HandleTCPClient(int clntSocket) {
+    // current time
+    time_t now;
+    time(&now);
+    // variables
+    unsigned int len = 0;
+
+    char buffer[RCVBUFSIZE]; /* Buffer for echo string */
+
+    int recvMsgSize;
+    int num_received = 0;
+
+    int status_code = 0;
+
+    // if capture fail, else receive image length
+    if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
+        DieWithError("recv() failed");
+    }
+
+    buffer[recvMsgSize] = '\0'; /* Terminate the string! */
+    len = atoi(buffer);
+    if (len > MAXSIZE) {
+        status_code = 3;
+        SendError(clntSocket, status_code);
+        return;
+    }
+    printf("Length of image: %d\n", len);
+
+    char *imgbuf = calloc(len, sizeof(char));
+
+    // File to save image
+    char name[10];
+    snprintf(name, 10, "%d.png", num_imgs);
+    num_imgs++;
+    FILE *imgfile = fopen(name, "wb");
+    if (imgfile == NULL) {
+        DieWithError("Failed to open file");
+    }
+
+    // save image
+    while (num_received < len) {
+        int remaining_bytes = len - num_received;
+        if (remaining_bytes == 28) {
+            // special case, always happens, send error message
+            status_code = 2;
+            SendError(clntSocket, status_code);
+            return;
+        }
+        int bytes_received =
+            recv(clntSocket, imgbuf + num_received, remaining_bytes, 0);
+        for (int i = 0; i < len; i++) {
+            printf("%d ", imgbuf[i]);
+        }
+        if (bytes_received <= 0) {
+            free(imgbuf);
+            DieWithError("recv() failed or connection closed prematurely");
+        }
+        num_received += bytes_received;
+    }
+
+    printf("\n");
+    // Write the received image data to the file
+    if (fwrite(imgbuf, 1, len, imgfile) != len) {
+        free(imgbuf);
+        DieWithError("Failed to write image data to file");
+    }
+    free(imgbuf);
+    fclose(imgfile);
+
+    // analyze image
+    analyze_send_url(clntSocket, name);
 
     close(clntSocket); /* Close client socket */
 }

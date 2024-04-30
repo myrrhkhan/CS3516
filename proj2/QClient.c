@@ -84,10 +84,11 @@ int main(int argc, char *argv[]) {
     }
     // printf("Sending over first message: %s\n", len);
     printf("Sending in\n");
-    for (int i = 0; i < qr_len; i++) {
-        printf("%d ", qr_string[i]);
+    for (int i = 3; i > 0; i--) {
+        printf("%d\n", i);
+        sleep(1);
     }
-    printf("Now.");
+    printf("Now.\n");
     if (send(sock, len, strlen(len), 0) != strlen(len))
         DieWithError("send() could not send URL back to client");
     // printf("Sending over second message: %s\n", qr_string);
@@ -95,14 +96,22 @@ int main(int argc, char *argv[]) {
     if (send(sock, qr_string, qr_len, 0) != qr_len)
         DieWithError("send() could not send URL back to client");
 
-    while (totalBytesRcvd < RCVBUFSIZE - 1) {
-        /* Receive up to the buffer size (minus 1 to leave space for
-        a null terminator) bytes from the sender */
-        if ((bytesRcvd = recv(sock, echoBuffer, RCVBUFSIZE - 1, 0)) <= 0)
-            DieWithError("recv() failed or connection closed prematurely");
-        totalBytesRcvd += bytesRcvd; /* Keep tally of total bytes */
-        // printf("%s\n", echoBuffer);  /* Print the echo buffer */
-    }
+    // receive status code
+    char status[1];
+    if ((bytesRcvd = recv(sock, status, sizeof(status), 0)) <= 0)
+        DieWithError("recv() failed or connection closed prematurely");
+    int status_code = atoi(status);
+    printf("Received status code: %d\n", status_code);
+    printf("Receiving message in 3 seconds\n");
+    // receive length of error message
+    char len_error[10];
+    if ((bytesRcvd = recv(sock, len_error, 10, 0)) <= 0)
+        DieWithError("recv() failed or connection closed prematurely");
+    // receive error message
+    char error[atoi(len_error)];
+    if ((bytesRcvd = recv(sock, error, atoi(len_error), 0)) <= 0)
+        DieWithError("recv() failed or connection closed prematurely");
+    printf("Received message:\n%s\n", error);
 
     // printf("\n"); /* Print a final linefeed */
     close(sock);
