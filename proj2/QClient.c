@@ -3,8 +3,11 @@
 #include <stdlib.h>     /* for atoi() and exit() */
 #include <string.h>     /* for memset() */
 #include <sys/socket.h> /* for socket(), connect(), send(), and recv() */
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/unistd.h>
 #include <unistd.h>     /* for close() */
-#define RCVBUFSIZE 1000 /* Size of receive buffer */
+#define RCVBUFSIZE 1024 /* Size of receive buffer */
 
 /* Error handling function */
 void DieWithError(char *errorMessage) {
@@ -31,14 +34,31 @@ int main(int argc, char *argv[]) {
     }
     ip = argv[2];          /* Second arg: server IP address (dotted quad) */
     qr_filename = argv[1]; /* First arg: string to echo */
+
     // save contents of qr_filename to qr_string
-    FILE *qr_file = fopen(qr_filename, "r");
+    FILE *qr_file = fopen(qr_filename, "rb");
     if (qr_file == NULL) {
         DieWithError("Failed to open file");
     }
-    char qr_string[RCVBUFSIZE];
-    fgets(qr_string, RCVBUFSIZE, qr_file);
+    // printf("here\n");
+
+    // get fstat to get file size and allocate char array
+    struct stat st;
+    stat(qr_filename, &st);
+    int qr_len = st.st_size;
+    char qr_string[qr_len + 1];
+    fread(qr_string, 1, st.st_size, qr_file);
+    qr_string[qr_len] = '\0';
     fclose(qr_file);
+
+    // for (int i = 0; i < qr_len; i++) {
+    // printf("%d ", qr_string[i]);
+    // }
+    // printf("\n");
+
+    // printf("QR string:\n%s\nend\n", qr_string);
+
+    // Set port
     port = atoi(argv[3]); /* Use given port, if any */
     /* Create a reliable, stream socket using TCP */
     if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
@@ -56,37 +76,25 @@ int main(int argc, char *argv[]) {
         DieWithError("connect() failed");
 
     char len[10];
-    snprintf(len, 10, "%ld", strlen(qr_string));
-    printf("Sending over first message: %s\n", len);
-    if (send(sock, len, sizeof(len), 0) != sizeof(len))
+    snprintf(len, 10, "%d", qr_len);
+    // printf("Sending over first message: %s\n", len);
+    if (send(sock, len, strlen(len), 0) != strlen(len))
         DieWithError("send() could not send URL back to client");
-    printf("Sending over second message: %s\n", qr_string);
-    if (send(sock, qr_string, sizeof(qr_string), 0) != sizeof(qr_string))
+    // printf("Sending over second message: %s\n", qr_string);
+    // printf("Length of qr_string: %d\n", qr_len);
+    if (send(sock, qr_string, qr_len, 0) != qr_len)
         DieWithError("send() could not send URL back to client");
-
-    // echoStringLen = strlen(echoString); /* Determine input length */
-    //
-    // /* Send the string to the server */
-    // if (send(sock, echoString, echoStringLen, 0) != echoStringLen)
-    //     DieWithError("send() could not successfully pass message.\nERR: sent
-    //     a "
-    //                  "different number of bytes than expected");
-    //
-    /* Receive the same string back from the server */
-    // totalBytesRcvd = 0;
-    printf("Received: "); /* Setup to print the echoed string */
 
     while (totalBytesRcvd < RCVBUFSIZE - 1) {
         /* Receive up to the buffer size (minus 1 to leave space for
         a null terminator) bytes from the sender */
         if ((bytesRcvd = recv(sock, echoBuffer, RCVBUFSIZE - 1, 0)) <= 0)
             DieWithError("recv() failed or connection closed prematurely");
-        totalBytesRcvd += bytesRcvd;  /* Keep tally of total bytes */
-        echoBuffer[bytesRcvd] = '\0'; /* Terminate the string! */
-        printf("%s\n", echoBuffer);   /* Print the echo buffer */
+        totalBytesRcvd += bytesRcvd; /* Keep tally of total bytes */
+        // printf("%s\n", echoBuffer);  /* Print the echo buffer */
     }
 
-    printf("\n"); /* Print a final linefeed */
+    // printf("\n"); /* Print a final linefeed */
     close(sock);
     exit(0);
 }

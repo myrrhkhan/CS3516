@@ -3,142 +3,175 @@
 #include <stdlib.h>     /* for atoi() and exit() */
 #include <string.h>     /* for memset() */
 #include <sys/socket.h> /* for socket(), bind(), and connect() */
-#include <unistd.h>     /* for close() */
-#define MAXPENDING 5    /* Maximum outstanding connection requests */
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>  /* for close() */
+#define MAXPENDING 5 /* Maximum outstanding connection requests */
 #define RCVBUFSIZE 32
+#define TIMEOUT 10
+#define MAXSIZE 250000 /* Maximum size of image */
 
-int num_users = 0;
+int num_imgs = 0;
 
 void DieWithError(char *errorMessage) {
     fprintf(stderr, "%s\n", errorMessage);
     exit(-1);
 }
 
-void HandleTCPClient(int clntSocket) {
-    // variables
-    unsigned int len;
+void SendError(int clntSocket, int status_code) {
+    char status[10];
+    char *err;
+    int err_len;
+    char err_len_str[10];
 
-    char buffer[RCVBUFSIZE];
-    int received_len = 0;
+    printf("Sending error\n");
+    snprintf(status, 10, "%d", status_code);
+    if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
+        DieWithError("send() could not send status code back to client");
+    }
+
+    if (status_code == 1) {
+        err = "No barcode found";
+    } else if (status_code == 2) {
+        err = "Timeout";
+    } else if (status_code == 3) {
+        err = "Rate limit exceeded, image too large.";
+    }
+
+    err_len = strlen(err);
+    snprintf(err_len_str, 10, "%d", err_len);
+    // send length of error
+    if (send(clntSocket, err_len_str, strlen(err_len_str), 0) !=
+        strlen(err_len_str)) {
+        DieWithError("send() could not send error length back to client");
+    }
+    // send error
+    if (send(clntSocket, err, err_len, 0) != err_len) {
+        DieWithError("send() could not send error back to client");
+    }
+
+    close(clntSocket);
+    return;
+}
+
+void HandleTCPClient(int clntSocket) {
+    // current time
+    time_t now;
+    time(&now);
+    // variables
+    unsigned int len = 0;
+
+    char buffer[RCVBUFSIZE]; /* Buffer for echo string */
 
     int recvMsgSize;
     int num_received = 0;
 
-    char img[RCVBUFSIZE];
+    int status_code = 0;
 
     // if capture fail
     if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
         DieWithError("recv() failed");
     }
 
-    // print buffer
-    printf("Received: %s\n", buffer);
+    buffer[recvMsgSize] = '\0'; /* Terminate the string! */
+    len = atoi(buffer);
+    if (len > MAXSIZE) {
+        status_code = 3;
+        return SendError(clntSocket, status_code);
+    }
 
-    while (recvMsgSize > 0) {
+    // File to save image
+    char name[10];
+    snprintf(name, 10, "%d.png", num_imgs);
+    num_imgs++;
+    FILE *imgfile = fopen(name, "wb");
+    if (imgfile == NULL) {
+        DieWithError("Failed to open file");
+    }
 
-        // if no length, read in length
-        if (!received_len) {
-            len = atoi(buffer);
-            printf("Length: %d\n", len);
-            received_len = 1;
-            continue;
-        } else if (num_received == len) {
-            received_len = 0;
-            num_received = 0;
+    while (num_received < len) {
 
-            char name[10];
-            snprintf(name, 10, "%d", num_users);
-            FILE *imgfile = fopen(name, "w");
-            fprintf(imgfile, "%s", img);
-            // find QR code with Java and popen, save result
-            char command[200 + len];
-            snprintf(command, 200 + len,
-                     "java -cp javase.jar:core.jar "
-                     "com.google.zxing.client.j2se.CommandLineRunner %s",
-                     name);
-            FILE *fp = popen(command, "r");
-            char url[200];
-            if (fp == NULL) {
-                DieWithError("Failed to run Java command");
-            }
-            fgets(url, sizeof(url), fp);
-            // close file and remove image
-            pclose(fp);
-            if (remove(name) != 0) {
-                DieWithError("Failed to remove image file");
-            }
-            // send result back to client
-            if (send(clntSocket, url, sizeof(url), 0) != sizeof(url))
-                DieWithError("send() could not send URL back to client");
-            // reset length
-            len = 0;
-            continue;
-        }
-
-        num_received++;
-
-        // save image as string
-
-        // if next capture fail
         if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
             DieWithError("recv() failed");
+        } else if (recvMsgSize + num_received > len) {
+            printf("Overflow checking\n");
+            recvMsgSize = len - num_received;
+        }
+        printf("Received: %d\n", recvMsgSize);
+        printf("Total received: %d\n", num_received);
+        printf("Total length: %d\n", len);
+        num_received += recvMsgSize;
+        if (fwrite(buffer, 1, recvMsgSize, imgfile) != recvMsgSize) {
+            DieWithError("Failed to write image data to file");
         }
     }
-}
 
-void HandleTCPClient2(int clntSocket) {
-    char echoBuffer[RCVBUFSIZE]; /* Buffer for echo string */
-    int recvMsgSize;             /* Size of received message */
-    /* Receive filesize from client */
-    if ((recvMsgSize = recv(clntSocket, echoBuffer, RCVBUFSIZE, 0)) < 0)
-        DieWithError("recv() of length failed");
+    fclose(imgfile);
 
-    printf("Received: %s\n", echoBuffer);
+    // fstat
+    struct stat st;
+    stat(name, &st);
+    len = st.st_size;
+    printf("File size: %d\n", len);
 
-    /* Receive image from client */
-    const int FILELEN = atoi(echoBuffer);
-    printf("File length: %d\n", FILELEN);
-    char file[FILELEN];
-
-    if ((recvMsgSize = recv(clntSocket, file, FILELEN, 0)) < 0)
-        DieWithError("recv() of image bytes failed");
-
-    printf("Received file: %s\n", file);
-
-    /* Save image locally */
-    char name[10];
-    snprintf(name, 10, "%d", num_users);
-    FILE *imgfile = fopen("", name);
-    fprintf(imgfile, "%s", file);
-
-    /* Run java command to process QR code, save result string to buffer */
-    char command[200];
-    snprintf(command, 200,
+    // find QR code with Java and popen, save result
+    char command[210];
+    snprintf(command, 210,
              "java -cp javase.jar:core.jar "
              "com.google.zxing.client.j2se.CommandLineRunner %s",
              name);
-
-    /* Run command and get result */
-    FILE *fp = popen(command, "r"); // used in CS 4513
-    char url[200];
+    FILE *fp = popen(command, "r");
+    printf("Attempted to run Java command...\n");
+    char url[250];
+    char all[1000];
     if (fp == NULL) {
         DieWithError("Failed to run Java command");
     }
-    fgets(url, sizeof(url), fp);
 
-    /* Close file and remove image */
+    // record output
+    /* Output is as follows
+     * Raw result:
+     * [URL]
+     * Parsed result:
+     * [URL]
+     * As such, we need to detect when parsed result is reached and save the url
+     * for after
+     */
+    int isnext = 0;
+    while (fgets(all, sizeof(url), fp) != NULL) {
+        printf("%s", all);
+        if (strstr(all, "Parsed result") != NULL) {
+            isnext = 1;
+        } else if (isnext) {
+            strcpy(url, all);
+            break;
+        } else if (strstr(all, "No barcode found") != NULL) {
+            strcpy(url, "No barcode found");
+            status_code = 1;
+            return SendError(clntSocket, status_code);
+        }
+    }
+    printf("URL: %s\n", url);
+    // close file and remove image
     pclose(fp);
     if (remove(name) != 0) {
         DieWithError("Failed to remove image file");
     }
-
-    /* Send result back to client */
-    if (send(clntSocket, url, sizeof(url), 0) != sizeof(url))
+    // send status code
+    char status[10];
+    snprintf(status, 10, "%d", status_code);
+    if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
+        DieWithError("send() could not send status code back to client");
+    }
+    // send result back to client
+    if (send(clntSocket, url, sizeof(url), 0) != sizeof(url)) {
         DieWithError("send() could not send URL back to client");
+    }
+    // reset length
+    len = 0;
 
     close(clntSocket); /* Close client socket */
-
-} /* TCP client handling function */
+}
 
 int main(int argc, char *argv[]) {
     int servSock; /* Socket descriptor for server */
@@ -172,6 +205,14 @@ int main(int argc, char *argv[]) {
     if (bind(servSock, (struct sockaddr *)&echoServAddr, sizeof(echoServAddr)) <
         0)
         DieWithError("bind() failed");
+
+    struct timeval timeout;
+    timeout.tv_sec = TIMEOUT;
+    timeout.tv_usec = 0;
+
+    // if (setsockopt(servSock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+    //                sizeof(timeout)) < 0)
+    //     DieWithError("setsockopt() failed");
 
     /* Mark the socket so it will listen for incoming connections */
     if (listen(servSock, MAXPENDING) < 0)
