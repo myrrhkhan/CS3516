@@ -7,15 +7,15 @@
 #include <sys/socket.h> /* for socket(), bind(), and connect() */
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>  /* for close() */
-#define MAXPENDING 5 /* Maximum outstanding connection requests */
+#include <unistd.h> /* for close() */
+#define MAXUSERS 5  /* Maximum outstanding connection requests */
 #define RCVBUFSIZE 32
 #define TIMEOUT 10
 #define MAXSIZE 250000 /* Maximum size of image */
 
 int proc_num = 0;
 
-void AcceptClient() { struct sockaddr_in ClientAddrs[MAXPENDING]; }
+int users[MAXUSERS];
 
 void delay_send(void) {
     printf("Sending in\n");
@@ -73,12 +73,14 @@ void SendError(int clntSocket, int status_code) {
 }
 
 void analyze_send_url(int clntSocket, char *name) {
+    printf("proc %d has reached\n", proc_num);
     int status_code = 0;
     // fstat
     struct stat st;
     stat(name, &st);
     int len = st.st_size;
     printf("File size: %d\n", len);
+    printf("Process %d is analyzing image %s\n", proc_num, name);
 
     // find QR code with Java and popen, save result
     char command[210];
@@ -87,7 +89,7 @@ void analyze_send_url(int clntSocket, char *name) {
              "com.google.zxing.client.j2se.CommandLineRunner %s",
              name);
     FILE *fp = popen(command, "r");
-    printf("Attempted to run Java command...\n");
+    printf("Attempted to run Java command on %d...\n", proc_num);
     char url[250];
     char all[1000];
     if (fp == NULL) {
@@ -118,7 +120,7 @@ void analyze_send_url(int clntSocket, char *name) {
             return;
         }
     }
-    printf("URL: %s\n", url);
+    printf("Proc %d has URL: %s\n", proc_num, url);
     // close file and remove image
     pclose(fp);
     if (remove(name) != 0) {
@@ -171,14 +173,13 @@ void HandleTCPClient(int clntSocket) {
         SendError(clntSocket, status_code);
         return;
     }
-    printf("Length of image: %d\n", len);
+    printf("proc %d has length of image: %d\n", proc_num, len);
 
     char *imgbuf = calloc(len, sizeof(char));
 
     // File to save image
     char name[10];
     snprintf(name, 10, "%d.png", proc_num);
-    proc_num++;
     FILE *imgfile = fopen(name, "wb");
     if (imgfile == NULL) {
         DieWithError("Failed to open file");
@@ -195,17 +196,19 @@ void HandleTCPClient(int clntSocket) {
         }
         int bytes_received =
             recv(clntSocket, imgbuf + num_received, remaining_bytes, 0);
-        for (int i = 0; i < len; i++) {
-            printf("%d ", imgbuf[i]);
-        }
+        // for (int i = 0; i < len; i++) {
+        //     printf("%d ", imgbuf[i]);
+        // }
         if (bytes_received <= 0) {
             free(imgbuf);
-            DieWithError("recv() failed or connection closed prematurely");
+            printf("proc %d, recv() failed or connection closed prematurely",
+                   proc_num);
+            return;
         }
         num_received += bytes_received;
     }
 
-    printf("\n");
+    printf("\n%d done\n", proc_num);
     // Write the received image data to the file
     if (fwrite(imgbuf, 1, len, imgfile) != len) {
         free(imgbuf);
@@ -248,6 +251,10 @@ int main(int argc, char *argv[]) {
         htonl(INADDR_ANY);                       /* Any incoming interface */
     echoServAddr.sin_port = htons(echoServPort); /* Local port */
 
+    if (setsockopt(servSock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) <
+        0)
+        DieWithError("setsockopt(SO_REUSEADDR) failed");
+
     /* Bind to the local address */
     if (bind(servSock, (struct sockaddr *)&echoServAddr, sizeof(echoServAddr)) <
         0)
@@ -262,23 +269,44 @@ int main(int argc, char *argv[]) {
     //     DieWithError("setsockopt() failed");
 
     /* Mark the socket so it will listen for incoming connections */
-    if (listen(servSock, MAXPENDING) < 0)
+    if (listen(servSock, MAXUSERS) < 0)
         DieWithError("listen() failed");
 
     printf("Server is running on port %d\n", echoServPort);
 
-    for (;;) /* Run forever */
-    {
+    // for i = 0 i < MAXUSERS i++
+    // fork process, set proc_num to i
+    int pid;
+    for (int i = 0; i < MAXUSERS; i++) {
+        if ((pid = fork()) < 0) {
+            DieWithError("fork() failed");
+        } else if (pid == 0) {
+            proc_num = i;
+            break;
+        }
+    }
 
-        /* Set the size of the in-out parameter */
-        clntLen = sizeof(echoClntAddr);
-        /* Wait for a client to connect */
-        if ((clntSock = accept(servSock, (struct sockaddr *)&echoClntAddr,
-                               &clntLen)) < 0)
-            DieWithError("accept() failed");
-        /* clntSock is connected to a client! */
-        printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
-        HandleTCPClient(clntSock);
+    if (pid == 0) {
+
+        for (;;) /* Run forever */
+        {
+
+            /* Set the size of the in-out parameter */
+            clntLen = sizeof(echoClntAddr);
+            /* Wait for a client to connect */
+            if ((clntSock = accept(servSock, (struct sockaddr *)&echoClntAddr,
+                                   &clntLen)) < 0)
+                DieWithError("accept() failed");
+            /* clntSock is connected to a client! */
+            printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
+            HandleTCPClient(clntSock);
+        }
+    } else {
+        // join
+        int waitpid;
+        while ((waitpid = wait(NULL)) > 0) {
+            printf("Child process %d has terminated\n", waitpid);
+        }
     }
     /* NOT REACHED */
 }
