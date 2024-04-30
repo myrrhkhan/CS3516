@@ -1,4 +1,5 @@
-#include <arpa/inet.h>  /* for sockaddr_in and inet_ntoa() */
+#include <arpa/inet.h> /* for sockaddr_in and inet_ntoa() */
+#include <pthread.h>
 #include <stdio.h>      /* for printf() and fprintf() */
 #include <stdlib.h>     /* for atoi() and exit() */
 #include <string.h>     /* for memset() */
@@ -12,6 +13,8 @@
 #define MAXSIZE 250000 /* Maximum size of image */
 
 int num_imgs = 0;
+
+void AcceptClient() { struct sockaddr_in ClientAddrs[MAXPENDING]; }
 
 void DieWithError(char *errorMessage) {
     fprintf(stderr, "%s\n", errorMessage);
@@ -93,9 +96,9 @@ void HandleTCPClient(int clntSocket) {
 
         if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
             DieWithError("recv() failed");
-        } else if (recvMsgSize + num_received > len) {
-            printf("Overflow checking\n");
-            recvMsgSize = len - num_received;
+            // } else if (recvMsgSize + num_received > len) {
+            //     printf("Overflow checking\n");
+            //     recvMsgSize = len - num_received;
         }
         printf("Received: %d\n", recvMsgSize);
         printf("Total received: %d\n", num_received);
@@ -164,7 +167,7 @@ void HandleTCPClient(int clntSocket) {
         DieWithError("send() could not send status code back to client");
     }
     // send result back to client
-    if (send(clntSocket, url, sizeof(url), 0) != sizeof(url)) {
+    if (send(clntSocket, url, strlen(url), 0) != strlen(url)) {
         DieWithError("send() could not send URL back to client");
     }
     // reset length
@@ -221,6 +224,13 @@ int main(int argc, char *argv[]) {
     printf("Server is running on port %d\n", echoServPort);
     for (;;) /* Run forever */
     {
+
+        // // threads for each client
+        // pthread_t thread_ids[MAXPENDING];
+        // for (int i = 0; i < MAXPENDING; i++) {
+        //     pthread_create(&thread_ids[i], NULL, HandleTCPClient, clntSock);
+        // }
+
         /* Set the size of the in-out parameter */
         clntLen = sizeof(echoClntAddr);
         /* Wait for a client to connect */
