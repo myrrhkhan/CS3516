@@ -16,14 +16,13 @@ void DieWithError(char *errorMessage) {
 }
 
 int main(int argc, char *argv[]) {
-    int sock;                          /* Socket descriptor */
-    struct sockaddr_in echoServAddr;   /* Echo server address */
-    unsigned short port;               /* Echo server port */
-    char *ip;                          /* Server IP address (dotted quad) */
-    char *qr_filename;                 /* String to send to echo server */
-    char echoBuffer[RCVBUFSIZE];       /* Buffer for echo string */
-    int bytesRcvd, totalBytesRcvd = 0; /* Bytes read in single recv()
-    and total bytes read */
+    int sock;                        /* Socket descriptor */
+    struct sockaddr_in echoServAddr; /* Echo server address */
+    unsigned short port;             /* Echo server port */
+    char *ip;                        /* Server IP address (dotted quad) */
+    char *qr_filename;               /* String to send to echo server */
+    int bytesRcvd = 0;               /* Bytes read in single recv()
+                  and total bytes read */
 
     /* Set things based on args */
     if (argc != 4) /* Test for correct number of arguments */

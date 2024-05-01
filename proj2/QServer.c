@@ -1,5 +1,9 @@
 #include <arpa/inet.h> /* for sockaddr_in and inet_ntoa() */
 #include <getopt.h>    /* for getopt() */
+#include <getopt.h>
+#include <netdb.h>      /* for getaddrinfo() */
+#include <netinet/in.h> /* for struct addrinfo */
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>      /* for printf() and fprintf() */
 #include <stdlib.h>     /* for atoi() and exit() */
@@ -8,14 +12,23 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h> /* for close() */
-#define MAXUSERS 5  /* Maximum outstanding connection requests */
 #define RCVBUFSIZE 32
 #define TIMEOUT 10
 #define MAXSIZE 250000 /* Maximum size of image */
 
-int proc_num = 0;
+/*
+ * CMD Args:
+ * port: port to run server on
+ * rate: rate limit for server in times per minute
+ * max: maximum number of connections
+ * timeout: timeout for server in seconds
+ * */
+int port = 2012;
+int rate = 3;
+int max = 3;
+int timeout = 80;
 
-int users[MAXUSERS];
+int proc_num = 0;
 
 void delay_send(void) {
     printf("Sending in\n");
@@ -29,6 +42,80 @@ void delay_send(void) {
 void DieWithError(char *errorMessage) {
     fprintf(stderr, "%s\n", errorMessage);
     exit(-1);
+}
+
+int get_listener(int port) {
+    // from beej's guide
+    int listener;
+    int yes = 1;
+    int rv;
+
+    struct addrinfo hints, *ai, *p;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    char portstr[1];
+    snprintf(portstr, 1, "%d", port);
+    if ((rv = getaddrinfo(NULL, portstr, &hints, &ai)) != 0) {
+        DieWithError("Couldn't get listener");
+    }
+
+    for (p = ai; p != NULL; p = p->ai_next) {
+        listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (listener < 0) {
+            continue;
+        }
+
+        // Lose the pesky "address already in use" error message
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+
+        if (bind(listener, p->ai_addr, p->ai_addrlen) < 0) {
+            close(listener);
+            continue;
+        }
+
+        break;
+    }
+
+    freeaddrinfo(ai); // All done with this
+
+    // If we got here, it means we didn't get bound
+    if (p == NULL) {
+        return -1;
+    }
+
+    // Listen
+    if (listen(listener, 10) == -1) {
+        return -1;
+    }
+
+    return listener;
+}
+
+// Add a new file descriptor to the set
+void add_to_pfds(struct pollfd *pfds[], int newfd, int *fd_count,
+                 int *fd_size) {
+    // If we don't have room, add more space in the pfds array
+    if (*fd_count == *fd_size) {
+        *fd_size *= 2; // Double it
+
+        *pfds = realloc(*pfds, sizeof(**pfds) * (*fd_size));
+    }
+
+    (*pfds)[*fd_count].fd = newfd;
+    (*pfds)[*fd_count].events = POLLIN; // Check ready-to-read
+
+    (*fd_count)++;
+}
+
+// Remove an index from the set
+void del_from_pfds(struct pollfd pfds[], int i, int *fd_count) {
+    // Copy the one from the end over this one
+    pfds[i] = pfds[*fd_count - 1];
+
+    (*fd_count)--;
 }
 
 void SendError(int clntSocket, int status_code) {
@@ -46,7 +133,8 @@ void SendError(int clntSocket, int status_code) {
     if (status_code == 1) {
         err = "No barcode found";
     } else if (status_code == 2) {
-        err = "Timeout, or weird bug where first 28 bytes are missing.";
+        err = "Timeout. Either took too long to respond, or server is too "
+              "busy, or weird bug where first 28 bytes are missing.";
     } else if (status_code == 3) {
         err = "Rate limit exceeded, image too large.";
     }
@@ -102,8 +190,8 @@ void analyze_send_url(int clntSocket, char *name) {
      * [URL]
      * Parsed result:
      * [URL]
-     * As such, we need to detect when parsed result is reached and save the url
-     * for after
+     * As such, we need to detect when parsed result is reached and save the
+     * url for after
      */
     int isnext = 0;
     while (fgets(all, sizeof(url), fp) != NULL) {
@@ -137,8 +225,8 @@ void analyze_send_url(int clntSocket, char *name) {
     if (send(clntSocket, url_len, strlen(url_len), 0) != strlen(url_len)) {
         DieWithError("send() could not send URL length back to client");
     }
-    // send result back to client, wait 3 seconds before sending to prevent data
-    // loss
+    // send result back to client, wait 3 seconds before sending to prevent
+    // data loss
 
     delay_send();
 
@@ -223,90 +311,172 @@ void HandleTCPClient(int clntSocket) {
     close(clntSocket); /* Close client socket */
 }
 
-int main(int argc, char *argv[]) {
-    int servSock; /* Socket descriptor for server */
-    int clntSock; /* Socket descriptor for client */
+void process_args(int argc, char **argv) {
 
-    struct sockaddr_in echoServAddr; /* Local address */
-    struct sockaddr_in echoClntAddr; /* Client address */
+    const char *const short_options = "p:r:m:t:";
 
-    unsigned short echoServPort; /* Server port */
-    unsigned int clntLen;        /* Length of client address data structure */
+    const struct option long_options[] = {
 
-    if (argc == 1) {
-        echoServPort = 2012;
-    } else {
-        echoServPort = atoi(argv[1]); /* First arg: local port */
-    }
+        {"port", required_argument, NULL, 'p'},
+        {"rate", required_argument, NULL, 'r'},
+        {"max", required_argument, NULL, 'm'},
+        {"timeout", required_argument, NULL, 't'},
 
-    /* Create socket for incoming connections */
-    if ((servSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
-        DieWithError("socket() failed");
+    };
 
-    /* Construct local address structure */
-    memset(&echoServAddr, 0, sizeof(echoServAddr)); /* Zero out structure */
+    while (1) {
+        const int opt = getopt_long(argc, argv, short_options, long_options,
+                                    NULL); // get the next option
 
-    echoServAddr.sin_family = AF_INET; /* Internet address family */
-    echoServAddr.sin_addr.s_addr =
-        htonl(INADDR_ANY);                       /* Any incoming interface */
-    echoServAddr.sin_port = htons(echoServPort); /* Local port */
+        if (opt == -1) {
+            break;
+        }
 
-    if (setsockopt(servSock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) <
-        0)
-        DieWithError("setsockopt(SO_REUSEADDR) failed");
-
-    /* Bind to the local address */
-    if (bind(servSock, (struct sockaddr *)&echoServAddr, sizeof(echoServAddr)) <
-        0)
-        DieWithError("bind() failed");
-
-    struct timeval timeout;
-    timeout.tv_sec = TIMEOUT;
-    timeout.tv_usec = 0;
-
-    // if (setsockopt(servSock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-    //                sizeof(timeout)) < 0)
-    //     DieWithError("setsockopt() failed");
-
-    /* Mark the socket so it will listen for incoming connections */
-    if (listen(servSock, MAXUSERS) < 0)
-        DieWithError("listen() failed");
-
-    printf("Server is running on port %d\n", echoServPort);
-
-    // for i = 0 i < MAXUSERS i++
-    // fork process, set proc_num to i
-    int pid;
-    for (int i = 0; i < MAXUSERS; i++) {
-        if ((pid = fork()) < 0) {
-            DieWithError("fork() failed");
-        } else if (pid == 0) {
-            proc_num = i;
+        switch (opt) {
+        case 'p':
+            printf("Port: %s\n", optarg);
+            port = atoi(optarg);
+            break;
+        case 'r':
+            printf("Rate: %s\n", optarg);
+            rate = atoi(optarg);
+            break;
+        case 'm':
+            printf("Max: %s\n", optarg);
+            max = atoi(optarg);
+            break;
+        case 't':
+            printf("Timeout: %s\n", optarg);
+            timeout = atoi(optarg);
+            break;
+        default:
             break;
         }
     }
+}
 
-    if (pid == 0) {
+int main(int argc, char *argv[]) {
 
-        for (;;) /* Run forever */
-        {
+    process_args(argc, argv);
 
-            /* Set the size of the in-out parameter */
-            clntLen = sizeof(echoClntAddr);
-            /* Wait for a client to connect */
-            if ((clntSock = accept(servSock, (struct sockaddr *)&echoClntAddr,
-                                   &clntLen)) < 0)
-                DieWithError("accept() failed");
-            /* clntSock is connected to a client! */
-            printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
-            HandleTCPClient(clntSock);
-        }
-    } else {
-        // join
-        int waitpid;
-        while ((waitpid = wait(NULL)) > 0) {
-            printf("Child process %d has terminated\n", waitpid);
-        }
+    int listener;
+    int newfd;
+    struct sockaddr_storage clientaddr;
+    socklen_t addrlen;
+
+    char remoteIP[INET_ADDRSTRLEN];
+
+    // make room for listeners
+    int fd_count = 0;
+    int fd_size = port;
+    struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
+
+    // get a socket
+    listener = get_listener(port);
+
+    if (listener == -1) {
+        DieWithError("Failed to bind to port");
     }
+
+    // Add the listener to set
+    pfds[0].fd = listener;
+    pfds[0].events = POLLIN; // Report ready to read on incoming connection
+    fd_count = 1;            // For the listener
+
+    // int servSock; /* Socket descriptor for server */
+    // int clntSock; /* Socket descriptor for client */
+    //
+    // struct sockaddr_in echoServAddr; /* Local address */
+    // struct sockaddr_in echoClntAddr; /* Client address */
+    //
+    // unsigned int clntLen; /* Length of client address data structure */
+    //
+    // /* Create socket for incoming connections */
+    // if ((servSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
+    //     DieWithError("socket() failed");
+    //
+    // /* Construct local address structure */
+    // memset(&echoServAddr, 0, sizeof(echoServAddr)); /* Zero out structure */
+    //
+    // echoServAddr.sin_family = AF_INET; /* Internet address family */
+    // echoServAddr.sin_addr.s_addr =
+    //     htonl(INADDR_ANY);               /* Any incoming interface */
+    // echoServAddr.sin_port = htons(port); /* Local port */
+    //
+    // if (setsockopt(servSock, SOL_SOCKET, SO_REUSEADDR, &(int){1},
+    // sizeof(int)) <
+    //     0)
+    //     DieWithError("setsockopt(SO_REUSEADDR) failed");
+    //
+    // /* Bind to the local address */
+    // if (bind(servSock, (struct sockaddr *)&echoServAddr,
+    // sizeof(echoServAddr)) <
+    //     0)
+    //     DieWithError("bind() failed");
+    //
+    // struct timeval timeout;
+    // timeout.tv_sec = TIMEOUT;
+    // timeout.tv_usec = 0;
+    //
+    // // if (setsockopt(servSock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+    // //                sizeof(timeout)) < 0)
+    // //     DieWithError("setsockopt() failed");
+    //
+    // /* Mark the socket so it will listen for incoming connections */
+    // if (listen(servSock, max) < 0)
+    //     DieWithError("listen() failed");
+    //
+    // printf("Server is running on port %d\n", port);
+    //
+    for (;;) /* Run forever */
+    {
+
+        int poll_count = poll(pfds, fd_count, timeout * 1000);
+
+        if (poll_count == -1) {
+            DieWithError("poll() failed");
+        }
+
+        // save listener to listen to
+        int listener = pfds[0].fd;
+
+        for (int i = 0; i < fd_count; i++) {
+            // if we have a new listener (new event)
+            if (pfds[i].revents & POLLIN) {
+                // new connection
+                addrlen = sizeof clientaddr;
+                newfd =
+                    accept(listener, (struct sockaddr *)&clientaddr, &addrlen);
+
+                if (newfd == -1) {
+                    DieWithError("accept() failed");
+                }
+
+                // Add the new socket to the set
+                add_to_pfds(&pfds, newfd, &fd_count, &fd_size);
+
+                printf("New connection from %s on socket %d\n",
+                       inet_ntop(clientaddr.ss_family,
+                                 &((struct sockaddr_in *)&clientaddr)->sin_addr,
+                                 remoteIP, INET_ADDRSTRLEN),
+                       newfd);
+                // save new listener to existing listener variable
+                listener = newfd;
+            }
+            // handle tcp client with new listener
+            HandleTCPClient(listener);
+        }
+
+        /* Set the size of the in-out parameter */
+        // clntLen = sizeof(echoClntAddr);
+        // /* Wait for a client to connect */
+        // if ((clntSock = accept(servSock, (struct sockaddr *)&echoClntAddr,
+        //                        &clntLen)) < 0)
+        //     DieWithError("accept() failed");
+        // /* clntSock is connected to a client! */
+        // printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
+        // HandleTCPClient(clntSock);
+    }
+
     /* NOT REACHED */
 }
