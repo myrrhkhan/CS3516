@@ -44,6 +44,52 @@ void DieWithError(char *errorMessage) {
     exit(-1);
 }
 
+void SendError(int clntSocket, int status_code) {
+    char status[10];
+    char *err;
+    int err_len;
+    char err_len_str[10];
+
+    printf("Sending error\n");
+    snprintf(status, 10, "%d", status_code);
+    if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
+        DieWithError("send() could not send status code back to client");
+    }
+
+    if (status_code == 1) {
+        err = "No barcode found";
+    } else if (status_code == 2) {
+        err = "Timeout. Either took too long to respond, or server is too "
+              "busy.";
+    } else if (status_code == 3) {
+        err = "Rate limit exceeded, image too large.";
+    }
+
+    delay_send();
+
+    err_len = strlen(err);
+    snprintf(err_len_str, 10, "%d", err_len);
+    // send length of error
+    if (send(clntSocket, err_len_str, strlen(err_len_str), 0) !=
+        strlen(err_len_str)) {
+        DieWithError("send() could not send error length back to client");
+    }
+
+    delay_send();
+
+    // send error
+    if (send(clntSocket, err, err_len, 0) != err_len) {
+        DieWithError("send() could not send error back to client");
+    }
+
+    printf("Error sent\n");
+
+    if (status_code != 2) {
+        close(clntSocket);
+    }
+    return;
+}
+
 int get_listener(int port) {
     // from beej's guide
     int listener;
@@ -56,8 +102,8 @@ int get_listener(int port) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
-    char portstr[1];
-    snprintf(portstr, 1, "%d", port);
+    char portstr[10];
+    snprintf(portstr, 10, "%d", port);
     if ((rv = getaddrinfo(NULL, portstr, &hints, &ai)) != 0) {
         DieWithError("Couldn't get listener");
     }
@@ -99,9 +145,9 @@ void add_to_pfds(struct pollfd *pfds[], int newfd, int *fd_count,
                  int *fd_size) {
     // If we don't have room, add more space in the pfds array
     if (*fd_count == *fd_size) {
-        *fd_size *= 2; // Double it
-
-        *pfds = realloc(*pfds, sizeof(**pfds) * (*fd_size));
+        // send timeout error to listener
+        SendError(newfd, 2);
+        return;
     }
 
     (*pfds)[*fd_count].fd = newfd;
@@ -116,48 +162,6 @@ void del_from_pfds(struct pollfd pfds[], int i, int *fd_count) {
     pfds[i] = pfds[*fd_count - 1];
 
     (*fd_count)--;
-}
-
-void SendError(int clntSocket, int status_code) {
-    char status[10];
-    char *err;
-    int err_len;
-    char err_len_str[10];
-
-    printf("Sending error\n");
-    snprintf(status, 10, "%d", status_code);
-    if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
-        DieWithError("send() could not send status code back to client");
-    }
-
-    if (status_code == 1) {
-        err = "No barcode found";
-    } else if (status_code == 2) {
-        err = "Timeout. Either took too long to respond, or server is too "
-              "busy, or weird bug where first 28 bytes are missing.";
-    } else if (status_code == 3) {
-        err = "Rate limit exceeded, image too large.";
-    }
-
-    delay_send();
-
-    err_len = strlen(err);
-    snprintf(err_len_str, 10, "%d", err_len);
-    // send length of error
-    if (send(clntSocket, err_len_str, strlen(err_len_str), 0) !=
-        strlen(err_len_str)) {
-        DieWithError("send() could not send error length back to client");
-    }
-
-    delay_send();
-
-    // send error
-    if (send(clntSocket, err, err_len, 0) != err_len) {
-        DieWithError("send() could not send error back to client");
-    }
-
-    close(clntSocket);
-    return;
 }
 
 void analyze_send_url(int clntSocket, char *name) {
@@ -220,8 +224,13 @@ void analyze_send_url(int clntSocket, char *name) {
         DieWithError("send() could not send status code back to client");
     }
     // send length of URL
+    // edge case
+    if (url[strlen(url) - 1] == '\n') {
+        url[strlen(url) - 1] = '\0';
+    }
     char url_len[10];
     snprintf(url_len, 10, "%lu", strlen(url));
+    printf("URL length: %s\n", url_len);
     if (send(clntSocket, url_len, strlen(url_len), 0) != strlen(url_len)) {
         DieWithError("send() could not send URL length back to client");
     }
@@ -235,10 +244,7 @@ void analyze_send_url(int clntSocket, char *name) {
     }
 }
 
-void HandleTCPClient(int clntSocket) {
-    // current time
-    time_t now;
-    time(&now);
+void HandleTCPClient(int clntSocket, int thread_num) {
     // variables
     unsigned int len = 0;
 
@@ -261,13 +267,12 @@ void HandleTCPClient(int clntSocket) {
         SendError(clntSocket, status_code);
         return;
     }
-    printf("proc %d has length of image: %d\n", proc_num, len);
 
     char *imgbuf = calloc(len, sizeof(char));
 
     // File to save image
     char name[10];
-    snprintf(name, 10, "%d.png", proc_num);
+    snprintf(name, 10, "%d.png", thread_num);
     FILE *imgfile = fopen(name, "wb");
     if (imgfile == NULL) {
         DieWithError("Failed to open file");
@@ -278,8 +283,9 @@ void HandleTCPClient(int clntSocket) {
         int remaining_bytes = len - num_received;
         if (remaining_bytes == 28) {
             // special case, always happens, send error message
-            status_code = 2;
-            SendError(clntSocket, status_code);
+            // status_code = 2;
+            // SendError(clntSocket, status_code);
+            // close(clntSocket);
             return;
         }
         int bytes_received =
@@ -289,8 +295,7 @@ void HandleTCPClient(int clntSocket) {
         // }
         if (bytes_received <= 0) {
             free(imgbuf);
-            printf("proc %d, recv() failed or connection closed prematurely",
-                   proc_num);
+            printf("recv() failed or connection closed prematurely");
             return;
         }
         num_received += bytes_received;
@@ -357,7 +362,16 @@ void process_args(int argc, char **argv) {
 
 int main(int argc, char *argv[]) {
 
+    printf("Test!");
+    // print args
+    for (int i = 0; i < argc; i++) {
+        printf("%s ", argv[i]);
+    }
+    printf("\n");
+
     process_args(argc, argv);
+
+    // https://github.com/baiwei0427/coding-examples/blob/master/poll-echo-server/poll-echo-server.c
 
     int listener;
     int newfd;
@@ -426,19 +440,20 @@ int main(int argc, char *argv[]) {
     // if (listen(servSock, max) < 0)
     //     DieWithError("listen() failed");
     //
-    // printf("Server is running on port %d\n", port);
-    //
+    printf("Server is running on port %d\n", port);
+
     for (;;) /* Run forever */
     {
 
         int poll_count = poll(pfds, fd_count, timeout * 1000);
+
+        pthread_t thread_ids[fd_count];
 
         if (poll_count == -1) {
             DieWithError("poll() failed");
         }
 
         // save listener to listen to
-        int listener = pfds[0].fd;
 
         for (int i = 0; i < fd_count; i++) {
             // if we have a new listener (new event)
@@ -460,11 +475,9 @@ int main(int argc, char *argv[]) {
                                  &((struct sockaddr_in *)&clientaddr)->sin_addr,
                                  remoteIP, INET_ADDRSTRLEN),
                        newfd);
-                // save new listener to existing listener variable
-                listener = newfd;
+                // handle TCP client, create new thread, join when done
+                HandleTCPClient(newfd, proc_num);
             }
-            // handle tcp client with new listener
-            HandleTCPClient(listener);
         }
 
         /* Set the size of the in-out parameter */
