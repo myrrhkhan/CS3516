@@ -5,6 +5,7 @@
 #include <netinet/in.h> /* for struct addrinfo */
 #include <poll.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdio.h>      /* for printf() and fprintf() */
 #include <stdlib.h>     /* for atoi() and exit() */
 #include <string.h>     /* for memset() */
@@ -15,6 +16,20 @@
 #define RCVBUFSIZE 32
 #define TIMEOUT 10
 #define MAXSIZE 250000 /* Maximum size of image */
+
+// https://www.delftstack.com/howto/c/try-catch-c/
+#define TRY                                                                    \
+    do {                                                                       \
+        jmp_buf buf_state;                                                     \
+        if (!setjmp(buf_state)) {
+#define CATCH                                                                  \
+    }                                                                          \
+    else {
+#define ENDTRY                                                                 \
+    }                                                                          \
+    }                                                                          \
+    while (0)
+#define THROW longjmp(buf_state, 1)
 
 /*
  * CMD Args:
@@ -28,8 +43,6 @@ int rate = 3;
 int max = 3;
 int timeout = 80;
 
-int proc_num = 0;
-
 void delay_send(void) {
     printf("Sending in\n");
     for (int i = 3; i > 0; i--) {
@@ -39,19 +52,36 @@ void delay_send(void) {
     printf("Now.\n");
 }
 
+void write_log(char *ip, char *type, char *violations, char *url) {
+    // get current time, convert to "YYYY-MM-DD HH:MM:SS"
+    time_t t = time(NULL);
+    char time[20];
+    strftime(time, 20, "%Y-%m-%d %H:%M:%S", localtime(&t));
+
+    /**
+     * Log columns (CSV)
+     * Time, IP, Type, Violations, URL
+     */
+    FILE *log = fopen("log.csv", "a");
+    fprintf(log, "%s, %s, %s, %s, %s\n", time, ip, type, violations, url);
+    fclose(log);
+}
+
 void DieWithError(char *errorMessage) {
     fprintf(stderr, "%s\n", errorMessage);
+    write_log("", "Error", errorMessage, "");
     exit(-1);
 }
 
-void SendError(int clntSocket, int status_code) {
+void SendError(int clntSocket, int status_code, char *ip) {
     char status[10];
-    char *err;
+    char *err = "";
     int err_len;
     char err_len_str[10];
 
     printf("Sending error\n");
     snprintf(status, 10, "%d", status_code);
+    write_log(ip, "Sending status code", "", "");
     if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
         DieWithError("send() could not send status code back to client");
     }
@@ -70,6 +100,7 @@ void SendError(int clntSocket, int status_code) {
     err_len = strlen(err);
     snprintf(err_len_str, 10, "%d", err_len);
     // send length of error
+    write_log(ip, "Sending error length", "", "");
     if (send(clntSocket, err_len_str, strlen(err_len_str), 0) !=
         strlen(err_len_str)) {
         DieWithError("send() could not send error length back to client");
@@ -78,16 +109,15 @@ void SendError(int clntSocket, int status_code) {
     delay_send();
 
     // send error
+    write_log(ip, "Sending error", "", "");
+    write_log(ip, "Error", err, "");
     if (send(clntSocket, err, err_len, 0) != err_len) {
         DieWithError("send() could not send error back to client");
     }
 
     printf("Error sent\n");
 
-    if (status_code != 2) {
-        close(clntSocket);
-    }
-    return;
+    close(clntSocket);
 }
 
 int get_listener(int port) {
@@ -146,7 +176,7 @@ void add_to_pfds(struct pollfd *pfds[], int newfd, int *fd_count,
     // If we don't have room, add more space in the pfds array
     if (*fd_count == *fd_size) {
         // send timeout error to listener
-        SendError(newfd, 2);
+        SendError(newfd, 2, "");
         return;
     }
 
@@ -164,15 +194,14 @@ void del_from_pfds(struct pollfd pfds[], int i, int *fd_count) {
     (*fd_count)--;
 }
 
-void analyze_send_url(int clntSocket, char *name) {
-    printf("proc %d has reached\n", proc_num);
+void analyze_send_url(int clntSocket, char *name, char *ip) {
     int status_code = 0;
     // fstat
     struct stat st;
     stat(name, &st);
     int len = st.st_size;
     printf("File size: %d\n", len);
-    printf("Process %d is analyzing image %s\n", proc_num, name);
+    printf("analyzing image %s\n", name);
 
     // find QR code with Java and popen, save result
     char command[210];
@@ -181,7 +210,7 @@ void analyze_send_url(int clntSocket, char *name) {
              "com.google.zxing.client.j2se.CommandLineRunner %s",
              name);
     FILE *fp = popen(command, "r");
-    printf("Attempted to run Java command on %d...\n", proc_num);
+    printf("Attempted to run Java command...\n");
     char url[250];
     char all[1000];
     if (fp == NULL) {
@@ -208,11 +237,11 @@ void analyze_send_url(int clntSocket, char *name) {
         } else if (strstr(all, "No barcode found") != NULL) {
             strcpy(url, "No barcode found");
             status_code = 1;
-            SendError(clntSocket, status_code);
+            SendError(clntSocket, status_code, ip);
             return;
         }
     }
-    printf("Proc %d has URL: %s\n", proc_num, url);
+    printf("URL: %s\n", url);
     // close file and remove image
     pclose(fp);
     if (remove(name) != 0) {
@@ -220,6 +249,7 @@ void analyze_send_url(int clntSocket, char *name) {
     }
     // send status code
     char *status = "0";
+    write_log(ip, "Sending status code", "", "");
     if (send(clntSocket, status, strlen(status), 0) != strlen(status)) {
         DieWithError("send() could not send status code back to client");
     }
@@ -231,6 +261,7 @@ void analyze_send_url(int clntSocket, char *name) {
     char url_len[10];
     snprintf(url_len, 10, "%lu", strlen(url));
     printf("URL length: %s\n", url_len);
+    write_log(ip, "Sending URL length", "", "");
     if (send(clntSocket, url_len, strlen(url_len), 0) != strlen(url_len)) {
         DieWithError("send() could not send URL length back to client");
     }
@@ -239,12 +270,13 @@ void analyze_send_url(int clntSocket, char *name) {
 
     delay_send();
 
+    write_log(ip, "Sending URL", "", url);
     if (send(clntSocket, url, strlen(url), 0) != strlen(url)) {
         DieWithError("send() could not send URL back to client");
     }
 }
 
-void HandleTCPClient(int clntSocket, int thread_num) {
+void HandleTCPClient(int clntSocket, int thread_num, char *ip) {
     // variables
     unsigned int len = 0;
 
@@ -257,14 +289,18 @@ void HandleTCPClient(int clntSocket, int thread_num) {
 
     // if capture fail, else receive image length
     if ((recvMsgSize = recv(clntSocket, buffer, RCVBUFSIZE, 0)) < 0) {
-        DieWithError("recv() failed");
+        printf("recv() failed or connection closed prematurely\n");
+        // pthread_exit((void *)(intptr_t)-1);
     }
+
+    write_log(ip, "Image length received", "", "");
 
     buffer[recvMsgSize] = '\0'; /* Terminate the string! */
     len = atoi(buffer);
     if (len > MAXSIZE) {
         status_code = 3;
-        SendError(clntSocket, status_code);
+        write_log(ip, "Image too large", "RATE", "");
+        SendError(clntSocket, status_code, ip);
         return;
     }
 
@@ -280,12 +316,16 @@ void HandleTCPClient(int clntSocket, int thread_num) {
 
     // save image
     while (num_received < len) {
+        write_log(ip, "Image data received", "", "");
         int remaining_bytes = len - num_received;
         if (remaining_bytes == 28) {
             // special case, always happens, send error message
             // status_code = 2;
             // SendError(clntSocket, status_code);
             // close(clntSocket);
+            free(imgbuf);
+            fclose(imgfile);
+            SendError(clntSocket, 2, ip);
             return;
         }
         int bytes_received =
@@ -295,13 +335,15 @@ void HandleTCPClient(int clntSocket, int thread_num) {
         // }
         if (bytes_received <= 0) {
             free(imgbuf);
+            fclose(imgfile);
             printf("recv() failed or connection closed prematurely");
+            write_log(ip, "Image data receive failed", "", "");
+            write_log(ip, "Connection closed", "", "");
             return;
         }
         num_received += bytes_received;
     }
 
-    printf("\n%d done\n", proc_num);
     // Write the received image data to the file
     if (fwrite(imgbuf, 1, len, imgfile) != len) {
         free(imgbuf);
@@ -310,10 +352,20 @@ void HandleTCPClient(int clntSocket, int thread_num) {
     free(imgbuf);
     fclose(imgfile);
 
-    // analyze image
-    analyze_send_url(clntSocket, name);
+    write_log(ip, "Image fully received", "", "");
 
-    close(clntSocket); /* Close client socket */
+    // analyze image
+    analyze_send_url(clntSocket, name, ip);
+
+    TRY {
+        close(clntSocket);
+        write_log(ip, "Connection closed", "", "");
+    }
+    CATCH {
+        printf("Couldn't close socket, one of the weird 28 ones.\n");
+        // pthread_exit((void *)(intptr_t)-1);
+    }
+    ENDTRY;
 }
 
 void process_args(int argc, char **argv) {
@@ -362,7 +414,6 @@ void process_args(int argc, char **argv) {
 
 int main(int argc, char *argv[]) {
 
-    printf("Test!");
     // print args
     for (int i = 0; i < argc; i++) {
         printf("%s ", argv[i]);
@@ -371,125 +422,72 @@ int main(int argc, char *argv[]) {
 
     process_args(argc, argv);
 
-    // https://github.com/baiwei0427/coding-examples/blob/master/poll-echo-server/poll-echo-server.c
+    write_log("", "Server startup attempt", "", "");
 
-    int listener;
-    int newfd;
-    struct sockaddr_storage clientaddr;
-    socklen_t addrlen;
-
-    char remoteIP[INET_ADDRSTRLEN];
-
-    // make room for listeners
-    int fd_count = 0;
-    int fd_size = port;
-    struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
-
-    // get a socket
-    listener = get_listener(port);
-
+    int listener = get_listener(port);
     if (listener == -1) {
-        DieWithError("Failed to bind to port");
+        DieWithError("Failed to bind listener");
     }
 
-    // Add the listener to set
+    struct pollfd *pfds = malloc(sizeof(*pfds) * max);
     pfds[0].fd = listener;
-    pfds[0].events = POLLIN; // Report ready to read on incoming connection
-    fd_count = 1;            // For the listener
+    pfds[0].events = POLLIN;
 
-    // int servSock; /* Socket descriptor for server */
-    // int clntSock; /* Socket descriptor for client */
-    //
-    // struct sockaddr_in echoServAddr; /* Local address */
-    // struct sockaddr_in echoClntAddr; /* Client address */
-    //
-    // unsigned int clntLen; /* Length of client address data structure */
-    //
-    // /* Create socket for incoming connections */
-    // if ((servSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
-    //     DieWithError("socket() failed");
-    //
-    // /* Construct local address structure */
-    // memset(&echoServAddr, 0, sizeof(echoServAddr)); /* Zero out structure */
-    //
-    // echoServAddr.sin_family = AF_INET; /* Internet address family */
-    // echoServAddr.sin_addr.s_addr =
-    //     htonl(INADDR_ANY);               /* Any incoming interface */
-    // echoServAddr.sin_port = htons(port); /* Local port */
-    //
-    // if (setsockopt(servSock, SOL_SOCKET, SO_REUSEADDR, &(int){1},
-    // sizeof(int)) <
-    //     0)
-    //     DieWithError("setsockopt(SO_REUSEADDR) failed");
-    //
-    // /* Bind to the local address */
-    // if (bind(servSock, (struct sockaddr *)&echoServAddr,
-    // sizeof(echoServAddr)) <
-    //     0)
-    //     DieWithError("bind() failed");
-    //
-    // struct timeval timeout;
-    // timeout.tv_sec = TIMEOUT;
-    // timeout.tv_usec = 0;
-    //
-    // // if (setsockopt(servSock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-    // //                sizeof(timeout)) < 0)
-    // //     DieWithError("setsockopt() failed");
-    //
-    // /* Mark the socket so it will listen for incoming connections */
-    // if (listen(servSock, max) < 0)
-    //     DieWithError("listen() failed");
-    //
-    printf("Server is running on port %d\n", port);
+    int fd_count = 1;
 
-    for (;;) /* Run forever */
-    {
+    printf("Server running on port %d\n", port);
+    write_log("", "Server startup", "", "");
 
+    for (;;) {
         int poll_count = poll(pfds, fd_count, timeout * 1000);
-
-        pthread_t thread_ids[fd_count];
 
         if (poll_count == -1) {
             DieWithError("poll() failed");
         }
 
-        // save listener to listen to
-
         for (int i = 0; i < fd_count; i++) {
-            // if we have a new listener (new event)
             if (pfds[i].revents & POLLIN) {
                 // new connection
-                addrlen = sizeof clientaddr;
-                newfd =
-                    accept(listener, (struct sockaddr *)&clientaddr, &addrlen);
+                socklen_t addrlen = sizeof(struct sockaddr_storage);
+                struct sockaddr_storage client_addr;
+                addrlen = sizeof(client_addr);
 
-                if (newfd == -1) {
+                // have newfd accept socket
+                int newfd = 0;
+                if ((newfd = accept(listener, (struct sockaddr *)&client_addr,
+                                    &addrlen)) == -1) {
                     DieWithError("accept() failed");
                 }
 
-                // Add the new socket to the set
-                add_to_pfds(&pfds, newfd, &fd_count, &fd_size);
+                // get IP
+                char ip[INET_ADDRSTRLEN];
+                struct sockaddr_in *sin = (struct sockaddr_in *)&client_addr;
+                inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+                write_log(ip, "New connection", "", "");
 
-                printf("New connection from %s on socket %d\n",
-                       inet_ntop(clientaddr.ss_family,
-                                 &((struct sockaddr_in *)&clientaddr)->sin_addr,
-                                 remoteIP, INET_ADDRSTRLEN),
-                       newfd);
-                // handle TCP client, create new thread, join when done
-                HandleTCPClient(newfd, proc_num);
+                if (fd_count < max) {
+                    add_to_pfds(&pfds, newfd, &fd_count, &max);
+                } else {
+                    SendError(newfd, 2, ip);
+                }
+
+                printf("New connection from %d\n", newfd);
+
+                struct args {
+                    int newfd;
+                    int i;
+                    char *ip;
+                } args = {newfd, i, ip};
+
+                // HandleTCPClient in separate thread
+                pthread_t thread;
+                pthread_create(&thread, NULL,
+                               (void *(*)(void *))HandleTCPClient,
+                               (void *)&args);
+                pthread_detach(thread);
             }
         }
-
-        /* Set the size of the in-out parameter */
-        // clntLen = sizeof(echoClntAddr);
-        // /* Wait for a client to connect */
-        // if ((clntSock = accept(servSock, (struct sockaddr *)&echoClntAddr,
-        //                        &clntLen)) < 0)
-        //     DieWithError("accept() failed");
-        // /* clntSock is connected to a client! */
-        // printf("Handling client %s\n", inet_ntoa(echoClntAddr.sin_addr));
-        // HandleTCPClient(clntSock);
     }
-
+    write_log("", "Server shutdown", "", "");
     /* NOT REACHED */
 }

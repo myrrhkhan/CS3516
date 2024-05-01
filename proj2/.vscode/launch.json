@@ -10,14 +10,21 @@
             "request": "launch",
             "program": "${workspaceFolder}/QServer",
             "args": [
-                "--port 2012 --rate 5 --max 1 --timeout 20"
+                "--port",
+                "2012", 
+                "--rate", 
+                "5", 
+                "--max",
+                "1",
+                "--timeout",
+                "20"
             ],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "lldb",
-            // "miDebuggerPath": "/usr/bin/gdb"
+            // "coreDumpPath": "${workspaceFolder}/dumps/"
         }
 
 
